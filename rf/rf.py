@@ -104,9 +104,9 @@ class ClassifierTree:
     if dbg: print 'Training tree'
     t0 = time.time()
     self.first_node = self.propagateTraining([None, data], copy.deepcopy(self.variables))
-    self.train_time = time.time() - t1
+    self.train_time = time.time() - t0
     if dbg: print ''
-    if dbg: print 'Done training tree'
+    if dbg: print 'Done training tree. Time (secs):', self.train_time
     
   def propagateTraining(self, node, variables, prefix=""):
     # This recursive function takes a list of form:
@@ -117,38 +117,59 @@ class ClassifierTree:
     
     data = node[1]
     
-    
     # If the data list is the min nodesize, or if we've run out of vars, then this is a leaf.
     # - Find the labels associated with each datum and aggregate them
     # - Replace the datalist with the aggregated label
     # - Return that label
     if (len(data) <= self.min_nodesize):
       if dbg: print prefix, '_'
-      return aggregate(extractLabels(data))
+      return aggregate(getAllLabels(data))
     
-    # Otherwise: first, remove a variable from the list inserts it in the None's postion:
+    # Otherwise: find the best-splitting variable and split the data by it
     # node = [var, [d, a, t, a]]
-    v = popRandomChoice(variables) # this will remove the variable as a side-effect
+    v, split = self.getBestSplit(data, variables)
     node[0] = v
+    variables.remove(v)
     
     if dbg: print prefix, v.px_index
     
-    # Partition the data and recurse on each partition
-    # node := (var, recurse_on_first_partition, recurse_on_next_partition, ...)
-    partitions = v.partition(data) # This comes out as a dict mapping cases to data subsets
+    # Recurse on each partition
+    # node := (var, recurse_on_first_split, recurse_on_next_split, ...)
     
     if dbg:
       print prefix,
-      for case in partitions:
-        print "{" + str(len(partitions[case])) + "}", 
+      for case in split:
+        print "{" + str(case) + ":" + str(len(split[case])) + "}", 
       print ''
       
-    for case in partitions:
+    for case in split:
       # It is unfortunate that we have to do a deepcopy of the vars list each time,
       # but i don't see a way around it so that we don't repeat or exclude variables
-      partitions[case] = self.propagateTraining([None, partitions[case]], copy.deepcopy(variables), prefix+"  ")
-    node[1] = partitions
+      split[case] = self.propagateTraining([None, split[case]], copy.deepcopy(variables), prefix+"  ")
+    node[1] = split
     return node
+    
+  def getBestSplit(self, data, available_variables):
+    # Returns the variable & split which maximizes the gini impurity
+    # No side effects occur on the list of variables
+    
+    # Choose subset of variables to try
+    vars_to_try = random.sample(available_variables, num_vars_tried_per_node)
+    
+    # Try splitting the data by each variable;
+    # find the split w/ maximum gini impurity
+    max_gini = 0
+    max_gini_split = None
+    max_gini_var = None
+    for variable in vars_to_try:
+      split = variable.partition(data)
+      gini = giniImpurity(split)
+      if gini > max_gini:
+        max_gini = gini
+        max_gini_split = split
+        max_gini_var = variable
+    
+    return [max_gini_var, max_gini_split]
     
   
   # Classify an observation!
@@ -168,7 +189,7 @@ class ClassifierTree:
     return propagateClassification(observation, casenodes[case])
 
 class RandomForest:
-  def __init__(self, num):
+  def __init__(self): pass
     
     
 
@@ -178,26 +199,57 @@ def popRandomChoice(_list):
   v = random.choice(_list)
   _list.remove(v)
   return v
+  
+# Compute gini impurity of a list of observations
+# Ig = 1 - (sum of squares of fractions of labels)
+def giniImpurity(grouped_data):
+  # The grouped_data should be a dict mapping categories to subsets of
+  # data which fit those category
+  N = 0.0
+  for group in grouped_data:
+    N += len(grouped_data[group])
+  
+  gini_sum = 0
+  # Count the data in each label group, and normalize the count
+  # Square it and add it to the summation
+  for group in grouped_data:
+    gini_sum += (len(grouped_data[group]) / N) ** 2
+  
+  return 1 - gini_sum
 
 # Methods to manipulate the digit recognizer's data
 def getPixel(digit_observation, i):
   return int(digit_observation[i+1])
 
-def extractLabels(training_data):
+def getLabel(observation):
   # The digit label is prepended at the beginning of each digit observation
-  return [datum[0] for datum in training_data]
-  
+  return observation[0]
+
+def getAllLabels(training_data):
+  # Returns a list of the labels of the training data
+  return [getLabel(observation) for observation in training_data]
+
+def groupByLabel(training_data):
+  # Returns a dict mapping label --> list of observations with that label
+  labelled_data = {l:[] for l in digit_labels}
+  for observation in data:
+    labelled_data[getLabel(observation)].append(observation)
+  return labelled_data
+
 def aggregate(labels):
+  # 'Vote' on one out of many labels.
   # For the specific digit recognizer case, there are 10 independent labels.
   # Just return the most common.
   return Counter(labels).most_common(1)
 
 def sampleTrainingData(data):
   # If there are N training observations, sample N from them (but with replacement)
+  # This is bagging
   sample = []
   for i in range(len(data)):
     d = random.choice(range(len(data)))
     sample.append(data[d])
+    if (d not in train_sample_counts): train_sample_counts[d] = 0
     train_sample_counts[d] += 1
   return sample
 
@@ -207,12 +259,14 @@ def sampleTrainingData(data):
 # This will get initialized when the training data is read.
 train_sample_counts = {}
 
-if __name__ == '__main__':
-  data_train = read_csv(test_data_file)
-  train_sample_counts = {i:0 for i in range(len(data_train))}
+
+def main():
+  data_train = read_csv(train_data_file)
   
   # The column headings are in the first row, so remove them
   headings = data_train.pop(0)
+  
+  train_sample_counts = {i:0 for i in range(len(data_train))}
   
   # Create variables representing each pixel
   digit_vars = []
@@ -226,3 +280,5 @@ if __name__ == '__main__':
   # Train it!
   tree1.train(sampleTrainingData(data_train))
   
+
+if __name__ == '__main__': main()
